@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   Plus, Pencil, Trash2, X, ArrowLeftRight,
-  RotateCcw, Check, Download, Upload, Layers, Search,
+  RotateCcw, Check, Download, Upload, Layers, Search, Shuffle,
 } from "lucide-react";
 
 /* ──────────────────────────────────────────────────────────
@@ -132,15 +132,34 @@ function saveWords(words) {
   } catch (_) {}
 }
 
-/* ─── 出題キュー：習熟度が低く、最近見ていない順 ─── */
+/* ─── シャッフル（Fisher-Yates） ─── */
+function shuffle(arr) {
+  const result = [...arr];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
+}
+
+/* ─── 出題キュー：習熟度が低い順、同じレベル内ではシャッフル ─── */
 function buildQueue(words, dir) {
-  return words
-    .map((w) => ({ w, s: w.stats[dir] }))
-    .sort((a, b) => {
-      if (a.s.level !== b.s.level) return a.s.level - b.s.level;
-      return a.s.lastSeen - b.s.lastSeen;
-    })
-    .map((x) => x.w.id);
+  // 習熟度レベルごとにグループ化
+  const grouped = {};
+  words.forEach((w) => {
+    const level = w.stats[dir].level;
+    if (!grouped[level]) grouped[level] = [];
+    grouped[level].push(w.id);
+  });
+  
+  // 各レベル内でシャッフル、習熟度順に結合
+  const queue = [];
+  for (let level = 0; level <= MAX_LEVEL; level++) {
+    if (grouped[level]) {
+      queue.push(...shuffle(grouped[level]));
+    }
+  }
+  return queue;
 }
 
 const MAX_LEVEL = 5;
@@ -154,7 +173,7 @@ export default function App() {
   const [queue, setQueue] = useState([]);
   const [qPos, setQPos] = useState(0);
   const [flipped, setFlipped] = useState(false);
-  const [sessionDone, setSessionDone] = useState({ gut: 0, nochmal: 0 });
+  const [sessionDone, setSessionDone] = useState({ deleted: 0, retest: 0 });
 
   const [editing, setEditing] = useState(null); // word | "new" | null
   const [filter, setFilter] = useState("");
@@ -185,7 +204,7 @@ export default function App() {
     setQueue(buildQueue(words, dir));
     setQPos(0);
     setFlipped(false);
-    setSessionDone({ gut: 0, nochmal: 0 });
+    setSessionDone({ deleted: 0, retest: 0 });
   }, [words, dir]);
 
   /* セッション開始 */
@@ -199,25 +218,39 @@ export default function App() {
   const currentId = queue[qPos];
   const current = currentId ? wordById(currentId) : null;
 
-  /* 採点 */
-  function rate(known) {
+  /* 削除：単語帳から消して次へ */
+  function deleteCurrent() {
     if (!current) return;
-    setWords((prev) =>
-      prev.map((w) => {
-        if (w.id !== current.id) return w;
-        const s = { ...w.stats[dir] };
-        s.seen += 1;
-        s.lastSeen = Date.now();
-        s.level = known ? Math.min(MAX_LEVEL, s.level + 1) : 0;
-        return { ...w, stats: { ...w.stats, [dir]: s } };
-      })
-    );
-    setSessionDone((d) => ({
-      gut: d.gut + (known ? 1 : 0),
-      nochmal: d.nochmal + (known ? 0 : 1),
-    }));
+    const id = current.id;
+    setWords((prev) => prev.filter((w) => w.id !== id));
+    setQueue((prev) => prev.filter((qid) => qid !== id));
+    setSessionDone((d) => ({ ...d, deleted: d.deleted + 1 }));
     setFlipped(false);
-    setTimeout(() => setQPos((p) => p + 1), 180);
+  }
+
+  /* 再テスト：キュー末尾付近に再挿入 */
+  function retestCurrent() {
+    if (!current) return;
+    const id = current.id;
+    setQueue((prev) => {
+      const next = prev.filter((qid) => qid !== id);
+      const insertAt = next.length > 2
+        ? next.length - Math.floor(Math.random() * Math.min(3, next.length)) - 1
+        : next.length;
+      const result = [...next];
+      result.splice(insertAt, 0, id);
+      return result;
+    });
+    setSessionDone((d) => ({ ...d, retest: d.retest + 1 }));
+    setFlipped(false);
+    setQPos((p) => p + 1);
+  }
+
+  /* シャッフル */
+  function shuffleQueue() {
+    setQueue((prev) => shuffle(prev));
+    setQPos(0);
+    setFlipped(false);
   }
 
   /* 単語の保存／削除 */
@@ -293,7 +326,8 @@ export default function App() {
           ? <StudyView
               dir={dir} setDir={setDir}
               current={current} flipped={flipped} setFlipped={setFlipped}
-              rate={rate} qPos={qPos} total={queue.length}
+              onDelete={deleteCurrent} onRetest={retestCurrent} onShuffle={shuffleQueue}
+              qPos={qPos} total={queue.length}
               sessionDone={sessionDone} restart={startSession}
               hasWords={words.length > 0} goManage={() => { setView("manage"); setEditing("new"); }}
             />
@@ -332,7 +366,7 @@ function TabBtn({ active, onClick, children }) {
 }
 
 /* ════════ 学習ビュー ════════ */
-function StudyView({ dir, setDir, current, flipped, setFlipped, rate, qPos, total, sessionDone, restart, hasWords, goManage }) {
+function StudyView({ dir, setDir, current, flipped, setFlipped, onDelete, onRetest, onShuffle, qPos, total, sessionDone, restart, hasWords, goManage }) {
   const progress = total ? Math.min(qPos, total) / total : 0;
 
   if (!hasWords) {
@@ -347,8 +381,16 @@ function StudyView({ dir, setDir, current, flipped, setFlipped, rate, qPos, tota
 
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-      {/* 方向トグル */}
-      <DirectionToggle dir={dir} setDir={setDir} />
+      {/* 方向トグル + シャッフルボタン */}
+      <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ flex: 1 }}>
+          <DirectionToggle dir={dir} setDir={setDir} />
+        </div>
+        <button className="vk-btn vk-icon-btn" onClick={onShuffle} title="シャッフル"
+          style={{ width: 46, background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.08)", borderRadius: 13, color: "#9DA1AB" }}>
+          <Shuffle size={17} />
+        </button>
+      </div>
 
       {/* 進捗バー */}
       <div style={{ height: 4, background: "rgba(255,255,255,.07)", borderRadius: 99, margin: "16px 0 18px", overflow: "hidden" }}>
@@ -361,7 +403,8 @@ function StudyView({ dir, setDir, current, flipped, setFlipped, rate, qPos, tota
           <FlashCard
             key={current.id + dir}
             word={current} dir={dir} flipped={flipped}
-            onFlip={() => setFlipped((f) => !f)} onRate={rate}
+            onFlip={() => setFlipped((f) => !f)}
+            onDelete={onDelete} onRetest={onRetest}
             counter={`${qPos + 1} / ${total}`}
           />
         )}
@@ -370,34 +413,31 @@ function StudyView({ dir, setDir, current, flipped, setFlipped, rate, qPos, tota
 }
 
 function DirectionToggle({ dir, setDir }) {
+  const isDE = dir === "deToEn";
   return (
-    <button className="vk-btn" onClick={() => setDir(dir === "deToEn" ? "enToDe" : "deToEn")}
+    <button className="vk-btn" onClick={() => setDir(isDE ? "enToDe" : "deToEn")}
       style={{
-        display: "flex", alignItems: "center", justifyContent: "center", gap: 12,
+        display: "flex", alignItems: "center", justifyContent: "space-between",
         background: "rgba(255,255,255,.05)", border: "1px solid rgba(255,255,255,.08)",
         borderRadius: 13, padding: "11px 16px", width: "100%",
       }}>
-      <Side label="DE" active={dir === "deToEn"} sub="ドイツ語" />
-      <ArrowLeftRight size={16} color="#7E818B" />
-      <Side label="EN" active={dir === "enToDe"} sub="英語" />
-      <span style={{ marginLeft: 4, fontSize: 11.5, color: "#7E818B" }}>を見て答える</span>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span className="vk-mono" style={{ fontSize: 15, fontWeight: 600, color: "#F2EFE7" }}>
+          {isDE ? "DE" : "EN"}
+        </span>
+        <span style={{ fontSize: 13, color: "#9DA1AB" }}>
+          を見て答える
+        </span>
+      </div>
+      <ArrowLeftRight size={15} color="#5E6170" />
     </button>
-  );
-}
-function Side({ label, active, sub }) {
-  return (
-    <span style={{ display: "flex", flexDirection: "column", alignItems: "center", lineHeight: 1.1 }}>
-      <span className="vk-mono" style={{ fontSize: 14, fontWeight: 500, color: active ? "#F2EFE7" : "#62656F" }}>{label}</span>
-      <span style={{ fontSize: 9, color: active ? "#9DA1AB" : "#52555E", marginTop: 2 }}>{sub}</span>
-    </span>
   );
 }
 
 /* ─── フラッシュカード本体 ─── */
-function FlashCard({ word, dir, flipped, onFlip, onRate, counter }) {
+function FlashCard({ word, dir, flipped, onFlip, onDelete, onRetest, counter }) {
   const gc = genderColor(word.gender);
   const isNoun = !!word.gender;
-  // 表＝問題、裏＝答え。方向で中身が変わる
   const germanIsPrompt = dir === "deToEn";
 
   return (
@@ -423,18 +463,13 @@ function FlashCard({ word, dir, flipped, onFlip, onRate, counter }) {
         </div>
       </div>
 
-      {/* 操作部 */}
-      <div style={{ marginTop: 18 }}>
-        {!flipped
-          ? <button className="vk-btn" onClick={onFlip}
-              style={{ width: "100%", padding: "15px", borderRadius: 14, background: "#EDEAE2", color: "#16171C", fontWeight: 600, fontSize: 15, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-              <RotateCcw size={16} /> 答えを見る
-            </button>
-          : <div className="vk-fade" style={{ display: "flex", gap: 10 }}>
-              <RateBtn onClick={() => onRate(false)} tone="again">もう一度<span>Nochmal</span></RateBtn>
-              <RateBtn onClick={() => onRate(true)} tone="good">覚えた<span>Gut</span></RateBtn>
-            </div>}
-      </div>
+      {/* 操作部：裏面表示時のみボタンを表示 */}
+      {flipped && (
+        <div className="vk-fade" style={{ display: "flex", gap: 10, marginTop: 18 }}>
+          <ActionBtn onClick={onDelete} tone="delete">削除<span>Löschen</span></ActionBtn>
+          <ActionBtn onClick={onRetest} tone="retest">再テスト<span>Nochmal</span></ActionBtn>
+        </div>
+      )}
     </div>
   );
 }
@@ -508,9 +543,9 @@ function FaceTag({ text, sub, color }) {
   );
 }
 
-function RateBtn({ onClick, tone, children }) {
-  const styles = tone === "good"
-    ? { bg: "rgba(46,156,106,.14)", bd: "rgba(46,156,106,.4)", fg: "#7BD3A6" }
+function ActionBtn({ onClick, tone, children }) {
+  const styles = tone === "retest"
+    ? { bg: "rgba(59,121,182,.14)", bd: "rgba(59,121,182,.4)", fg: "#7FA8D6" }
     : { bg: "rgba(190,71,99,.13)", bd: "rgba(190,71,99,.4)", fg: "#E58AA0" };
   return (
     <button className="vk-btn vk-rate" onClick={onClick}
@@ -531,7 +566,7 @@ function SessionComplete({ done, onRestart }) {
       <div>
         <div className="vk-serif" style={{ fontSize: 24, fontWeight: 600 }}>ひと回り完了</div>
         <div style={{ fontSize: 14, color: "#9A9DA6", marginTop: 6 }}>
-          覚えた {done.gut} ・ もう一度 {done.nochmal}
+          削除 {done.deleted} ・ 再テスト {done.retest}
         </div>
       </div>
       <button className="vk-btn" onClick={onRestart}
