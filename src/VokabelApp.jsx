@@ -2315,7 +2315,7 @@ function GermanFace({ word, gc, isNoun, counter, prompt }) {
           )}
         </div>
         {word.exampleDE && (
-          <div className="vk-serif" style={{ fontStyle: "italic", fontSize: 16, lineHeight: 1.5, color: "#494750", borderLeft: "2px solid " + gc, paddingLeft: 12 }}>
+          <div className="vk-serif" style={{ fontStyle: "italic", fontSize: 18, lineHeight: 1.5, color: "#494750", borderLeft: "2px solid " + gc, paddingLeft: 12 }}>
             {word.exampleDE}
           </div>
         )}
